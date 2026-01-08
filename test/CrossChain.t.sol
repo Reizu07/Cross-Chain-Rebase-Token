@@ -38,6 +38,7 @@ contract CrossChainTest is Test {
     // Users
     address owner = makeAddr("owner");
     address user = makeAddr("user");
+    uint256 SEND_VALUE = 1e5;
 
     // Fork IDs
     uint256 sepoliaFork;
@@ -146,6 +147,7 @@ contract CrossChainTest is Test {
         TokenAdminRegistry(arbSepoliaNetworkDetails.tokenAdminRegistryAddress)
             .setPool(address(arbSepoliaToken), address(arbSepoliaPool));
 
+        vm.stopPrank();
         // ----------------------------------------
         // Step 3: Configure token pools for cross-chain
         // ----------------------------------------
@@ -163,12 +165,10 @@ contract CrossChainTest is Test {
         configureTokenPool(
             arbSepoliaFork,
             address(arbSepoliaPool),
-            arbSepoliaNetworkDetails.chainSelector,
+            sepoliaNetworkDetails.chainSelector,
             address(sepoliaPool),
             address(sepoliaToken)
         );
-
-        vm.stopPrank();
     }
 
     // ============================================
@@ -258,7 +258,12 @@ contract CrossChainTest is Test {
             data: "",
             tokenAmounts: tokenAmount,
             feeToken: localNetworkDetails.linkAddress,
-            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 0}))
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV2({
+                    gasLimit: 100_000,
+                    allowOutOfOrderExecution: false
+                })
+            )
         });
 
         // ----------------------------------------
@@ -273,13 +278,11 @@ contract CrossChainTest is Test {
         // ----------------------------------------
         // Step 3: Approve tokens
         // ----------------------------------------
-        vm.prank(user);
+        vm.startPrank(user);
         IERC20(localNetworkDetails.linkAddress).approve(
             localNetworkDetails.routerAddress,
             fee
         );
-
-        vm.prank(user);
         IERC20(address(localToken)).approve(
             localNetworkDetails.routerAddress,
             amountToBridge
@@ -289,35 +292,58 @@ contract CrossChainTest is Test {
         // Step 4: Send CCIP message
         // ----------------------------------------
         uint256 localBalanceBefore = localToken.balanceOf(user);
-
-        vm.prank(user);
         IRouterClient(localNetworkDetails.routerAddress).ccipSend(
             remoteNetworkDetails.chainSelector,
             message
         );
-
-        uint256 localBalanceAfter = localToken.balanceOf(user);
-        assertEq(localBalanceAfter, localBalanceBefore - amountToBridge);
+        assertEq(
+            localToken.balanceOf(user),
+            localBalanceBefore - amountToBridge
+        );
 
         // Store interest rate for verification
         uint256 localUserInterestRate = localToken.getUserInterestRate(user);
+        vm.stopPrank();
 
         // ----------------------------------------
         // Step 5: Receive on destination chain
         // ----------------------------------------
-        vm.selectFork(remoteFork);
-        vm.warp(block.timestamp + 20 minutes);
-
-        uint256 remoteBalanceBefore = remoteToken.balanceOf(user);
+        // switchChainAndRouteMessage switches to destination and routes the message
+        // It needs the DESTINATION fork ID (where message should be delivered)
         ccipLocalSimulatorFork.switchChainAndRouteMessage(remoteFork);
-        uint256 remoteBalanceAfter = remoteToken.balanceOf(user);
 
         // ----------------------------------------
         // Step 6: Verify results
         // ----------------------------------------
-        assertEq(remoteBalanceAfter, remoteBalanceBefore + amountToBridge);
+        assertEq(remoteToken.balanceOf(user), amountToBridge);
+        assertEq(remoteToken.getUserInterestRate(user), localUserInterestRate);
+    }
 
-        uint256 remoteUserInterestRate = remoteToken.getUserInterestRate(user);
-        assertEq(remoteUserInterestRate, localUserInterestRate);
+    function testBridgeAllTokens() public {
+        vm.selectFork(sepoliaFork);
+        vm.deal(user, SEND_VALUE);
+        vm.prank(user);
+        Vault(payable(address(vault))).deposit{value: SEND_VALUE}();
+        assertEq(sepoliaToken.balanceOf(user), SEND_VALUE);
+        bridgeTokens(
+            SEND_VALUE,
+            sepoliaFork,
+            arbSepoliaFork,
+            sepoliaNetworkDetails,
+            arbSepoliaNetworkDetails,
+            sepoliaToken,
+            arbSepoliaToken
+        );
+        vm.selectFork(arbSepoliaFork);
+        vm.warp(block.timestamp + 20 minutes);
+        bridgeTokens(
+            arbSepoliaToken.balanceOf(user),
+            arbSepoliaFork,
+            sepoliaFork,
+            arbSepoliaNetworkDetails,
+            sepoliaNetworkDetails,
+            arbSepoliaToken,
+            sepoliaToken
+        );
     }
 }
