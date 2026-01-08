@@ -1,50 +1,92 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.24;
 
+// ============================================
+// ============== IMPORTS =====================
+// ============================================
+
+// Foundry
 import {Test, console} from "forge-std/Test.sol";
+
+// CCIP Local Simulator
 import {CCIPLocalSimulatorFork, Register} from "@chainlink-local/src/ccip/CCIPLocalSimulatorFork.sol";
+
+// CCIP Contracts
 import {IERC20} from "@ccip/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {RegistryModuleOwnerCustom} from "@ccip/contracts/src/v0.8/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 import {TokenAdminRegistry} from "@ccip/contracts/src/v0.8/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
 import {TokenPool} from "@ccip/contracts/src/v0.8/ccip/pools/TokenPool.sol";
 import {RateLimiter} from "@ccip/contracts/src/v0.8/ccip/libraries/RateLimiter.sol";
+import {Client} from "@ccip/contracts/src/v0.8/ccip/libraries/Client.sol";
+import {IRouterClient} from "@ccip/contracts/src/v0.8/ccip/interfaces/IRouterClient.sol";
+
+// Project Contracts
 import {RebaseToken} from "../src/RebaseToken.sol";
 import {RebaseTokenPool} from "../src/RebaseTokenPool.sol";
 import {Vault} from "../src/Vault.sol";
 import {IRebaseToken} from "../src/interfaces/IRebaseToken.sol";
 
+// ============================================
+// ============== CONTRACT ====================
+// ============================================
+
 contract CrossChainTest is Test {
+    // ============================================
+    // ============== STATE VARIABLES =============
+    // ============================================
+
+    // Users
     address owner = makeAddr("owner");
+    address user = makeAddr("user");
+
+    // Fork IDs
     uint256 sepoliaFork;
     uint256 arbSepoliaFork;
 
+    // CCIP Simulator
     CCIPLocalSimulatorFork ccipLocalSimulatorFork;
 
+    // Tokens
     RebaseToken sepoliaToken;
     RebaseToken arbSepoliaToken;
 
+    // Vault
     Vault vault;
 
+    // Token Pools
     RebaseTokenPool sepoliaPool;
     RebaseTokenPool arbSepoliaPool;
 
+    // Network Details
     Register.NetworkDetails sepoliaNetworkDetails;
     Register.NetworkDetails arbSepoliaNetworkDetails;
 
+    // ============================================
+    // ============== SETUP =======================
+    // ============================================
+
     function setUp() public {
+        // Initialize owner
         owner = makeAddr("owner");
+
+        // Create forks
         sepoliaFork = vm.createSelectFork("sepolia");
         arbSepoliaFork = vm.createFork("arbitrum-sepolia");
 
+        // Initialize CCIP simulator
         ccipLocalSimulatorFork = new CCIPLocalSimulatorFork();
         vm.makePersistent(address(ccipLocalSimulatorFork));
 
-        // 1. Deploy and configure on Sepolia
+        // ----------------------------------------
+        // Step 1: Deploy and configure on Sepolia
+        // ----------------------------------------
         sepoliaNetworkDetails = ccipLocalSimulatorFork.getNetworkDetails(
             block.chainid
         );
+
         vm.startPrank(owner);
+
+        // Deploy contracts
         sepoliaToken = new RebaseToken();
         vault = new Vault(IRebaseToken(address(sepoliaToken)));
         sepoliaPool = new RebaseTokenPool(
@@ -53,23 +95,35 @@ contract CrossChainTest is Test {
             sepoliaNetworkDetails.rmnProxyAddress,
             sepoliaNetworkDetails.routerAddress
         );
+
+        // Grant roles
         sepoliaToken.grantMintAndBurnRole(address(vault));
         sepoliaToken.grantMintAndBurnRole(address(sepoliaPool));
+
+        // Register token in CCIP
         RegistryModuleOwnerCustom(
             sepoliaNetworkDetails.registryModuleOwnerCustomAddress
         ).registerAdminViaOwner(address(sepoliaToken));
+
         TokenAdminRegistry(sepoliaNetworkDetails.tokenAdminRegistryAddress)
             .acceptAdminRole(address(sepoliaToken));
+
         TokenAdminRegistry(sepoliaNetworkDetails.tokenAdminRegistryAddress)
             .setPool(address(sepoliaToken), address(sepoliaPool));
+
         vm.stopPrank();
 
-        // 2. Deploy and configure on Arbitrum Sepolia
+        // ------------------------------------------------
+        // Step 2: Deploy and configure on Arbitrum Sepolia
+        // ------------------------------------------------
         vm.selectFork(arbSepoliaFork);
         arbSepoliaNetworkDetails = ccipLocalSimulatorFork.getNetworkDetails(
             block.chainid
         );
+
         vm.startPrank(owner);
+
+        // Deploy contracts
         arbSepoliaToken = new RebaseToken();
         arbSepoliaPool = new RebaseTokenPool(
             IERC20(address(arbSepoliaToken)),
@@ -77,14 +131,26 @@ contract CrossChainTest is Test {
             arbSepoliaNetworkDetails.rmnProxyAddress,
             arbSepoliaNetworkDetails.routerAddress
         );
+
+        // Grant roles
         arbSepoliaToken.grantMintAndBurnRole(address(arbSepoliaPool));
+
+        // Register token in CCIP
         RegistryModuleOwnerCustom(
             arbSepoliaNetworkDetails.registryModuleOwnerCustomAddress
         ).registerAdminViaOwner(address(arbSepoliaToken));
+
         TokenAdminRegistry(arbSepoliaNetworkDetails.tokenAdminRegistryAddress)
             .acceptAdminRole(address(arbSepoliaToken));
+
         TokenAdminRegistry(arbSepoliaNetworkDetails.tokenAdminRegistryAddress)
             .setPool(address(arbSepoliaToken), address(arbSepoliaPool));
+
+        // ----------------------------------------
+        // Step 3: Configure token pools for cross-chain
+        // ----------------------------------------
+
+        // Configure Sepolia pool to know about Arbitrum pool
         configureTokenPool(
             sepoliaFork,
             address(sepoliaPool),
@@ -92,6 +158,8 @@ contract CrossChainTest is Test {
             address(arbSepoliaPool),
             address(arbSepoliaToken)
         );
+
+        // Configure Arbitrum pool to know about Sepolia pool
         configureTokenPool(
             arbSepoliaFork,
             address(arbSepoliaPool),
@@ -99,9 +167,22 @@ contract CrossChainTest is Test {
             address(sepoliaPool),
             address(sepoliaToken)
         );
+
         vm.stopPrank();
     }
 
+    // ============================================
+    // ============== HELPER FUNCTIONS ============
+    // ============================================
+
+    /**
+     * @dev Configures a token pool for cross-chain communication
+     * @param fork Fork ID to switch to
+     * @param localPool Address of the local token pool
+     * @param remoteChainSelector Chain selector of the remote chain
+     * @param remotePool Address of the remote token pool
+     * @param remoteTokenAddress Address of the remote token
+     */
     function configureTokenPool(
         uint256 fork,
         address localPool,
@@ -111,8 +192,12 @@ contract CrossChainTest is Test {
     ) public {
         vm.selectFork(fork);
         vm.prank(owner);
+
+        // Prepare remote pool addresses
         bytes[] memory remotePoolAddresses = new bytes[](1);
         remotePoolAddresses[0] = abi.encode(remotePool);
+
+        // Create chain update config
         TokenPool.ChainUpdate[]
             memory chainsToAdd = new TokenPool.ChainUpdate[](1);
         chainsToAdd[0] = TokenPool.ChainUpdate({
@@ -130,6 +215,109 @@ contract CrossChainTest is Test {
                 rate: 0
             })
         });
+
+        // Apply chain updates
         TokenPool(localPool).applyChainUpdates(new uint64[](0), chainsToAdd);
+    }
+
+    /**
+     * @dev Bridges tokens from one chain to another
+     * @param amountToBridge Amount of tokens to bridge
+     * @param localFork Fork ID of the source chain
+     * @param remoteFork Fork ID of the destination chain
+     * @param localNetworkDetails Network details of the source chain
+     * @param remoteNetworkDetails Network details of the destination chain
+     * @param localToken Token contract on the source chain
+     * @param remoteToken Token contract on the destination chain
+     */
+    function bridgeTokens(
+        uint256 amountToBridge,
+        uint256 localFork,
+        uint256 remoteFork,
+        Register.NetworkDetails memory localNetworkDetails,
+        Register.NetworkDetails memory remoteNetworkDetails,
+        RebaseToken localToken,
+        RebaseToken remoteToken
+    ) public {
+        // ----------------------------------------
+        // Step 1: Prepare on source chain
+        // ----------------------------------------
+        vm.selectFork(localFork);
+
+        // Create token amount array for CCIP message
+        Client.EVMTokenAmount[]
+            memory tokenAmount = new Client.EVMTokenAmount[](1);
+        tokenAmount[0] = Client.EVMTokenAmount({
+            token: address(localToken),
+            amount: amountToBridge
+        });
+
+        // Create CCIP message
+        Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+            receiver: abi.encode(user),
+            data: "",
+            tokenAmounts: tokenAmount,
+            feeToken: localNetworkDetails.linkAddress,
+            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 0}))
+        });
+
+        // ----------------------------------------
+        // Step 2: Calculate fee and get LINK
+        // ----------------------------------------
+        uint256 fee = IRouterClient(localNetworkDetails.routerAddress).getFee(
+            remoteNetworkDetails.chainSelector,
+            message
+        );
+        ccipLocalSimulatorFork.requestLinkFromFaucet(user, fee);
+
+        // ----------------------------------------
+        // Step 3: Approve tokens
+        // ----------------------------------------
+        vm.prank(user);
+        IERC20(localNetworkDetails.linkAddress).approve(
+            localNetworkDetails.routerAddress,
+            fee
+        );
+
+        vm.prank(user);
+        IERC20(address(localToken)).approve(
+            localNetworkDetails.routerAddress,
+            amountToBridge
+        );
+
+        // ----------------------------------------
+        // Step 4: Send CCIP message
+        // ----------------------------------------
+        uint256 localBalanceBefore = localToken.balanceOf(user);
+
+        vm.prank(user);
+        IRouterClient(localNetworkDetails.routerAddress).ccipSend(
+            remoteNetworkDetails.chainSelector,
+            message
+        );
+
+        uint256 localBalanceAfter = localToken.balanceOf(user);
+        assertEq(localBalanceAfter, localBalanceBefore - amountToBridge);
+
+        // Store interest rate for verification
+        uint256 localUserInterestRate = localToken.getUserInterestRate(user);
+
+        // ----------------------------------------
+        // Step 5: Receive on destination chain
+        // ----------------------------------------
+        vm.selectFork(remoteFork);
+        vm.warp(block.timestamp + 20 minutes);
+
+        uint256 remoteBalanceBefore = remoteToken.balanceOf(user);
+        ccipLocalSimulatorFork.switchChainAndRouteMessage(remoteFork);
+        uint256 remoteBalanceAfter = remoteToken.balanceOf(user);
+
+        // ----------------------------------------
+        // Step 6: Verify results
+        // ----------------------------------------
+        assertEq(remoteBalanceAfter, remoteBalanceBefore + amountToBridge);
+
+        uint256 remoteUserInterestRate = remoteToken.getUserInterestRate(user);
+        assertEq(remoteUserInterestRate, localUserInterestRate);
     }
 }
