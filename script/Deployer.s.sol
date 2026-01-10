@@ -24,7 +24,17 @@ contract TokenAndPoolPlayer is Script {
             networkDetails.rmnProxyAddress,
             networkDetails.routerAddress
         );
-        token.grantMintAndBurnRole(address(pool));
+        vm.stopBroadcast();
+    }
+}
+
+contract setPermissions is Script {
+    function run(address token, address pool) public {
+        CCIPLocalSimulatorFork ccipLocalSimulatorFork = new CCIPLocalSimulatorFork();
+        Register.NetworkDetails memory networkDetails = ccipLocalSimulatorFork
+            .getNetworkDetails(block.chainid);
+        vm.startBroadcast();
+        IRebaseToken(token).grantMintAndBurnRole(address(pool));
         RegistryModuleOwnerCustom(
             networkDetails.registryModuleOwnerCustomAddress
         ).registerAdminViaOwner(address(token));

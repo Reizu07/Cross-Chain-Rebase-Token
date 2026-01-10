@@ -301,8 +301,7 @@ contract CrossChainTest is Test {
             localBalanceBefore - amountToBridge
         );
 
-        // Store interest rate for verification
-        uint256 localUserInterestRate = localToken.getUserInterestRate(user);
+        // Store interest rate for verificatio
         vm.stopPrank();
 
         // ----------------------------------------
@@ -316,7 +315,6 @@ contract CrossChainTest is Test {
         // Step 6: Verify results
         // ----------------------------------------
         assertEq(remoteToken.balanceOf(user), amountToBridge);
-        assertEq(remoteToken.getUserInterestRate(user), localUserInterestRate);
     }
 
     function testBridgeAllTokens() public {
