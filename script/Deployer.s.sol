@@ -21,7 +21,7 @@ contract TokenAndPoolPlayer is Script {
         pool = new RebaseTokenPool(
             IERC20(address(token)),
             new address[](0),
-            networkDetails.rnmProxyAddress,
+            networkDetails.rmnProxyAddress,
             networkDetails.routerAddress
         );
         token.grantMintAndBurnRole(address(pool));
